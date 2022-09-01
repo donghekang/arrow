@@ -411,6 +411,45 @@ Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet&
                {"aggregate", compute::AggregateNodeOptions{aggregates, keys}}}),
           static_cast<int>(aggregates.size())};
     }
+    case substrait::Rel::RelTypeCase::kSet: {
+      const auto& set = rel.set();
+      RETURN_NOT_OK(CheckRelCommon(set));
+      if(set.op() != substrait::SetRel_SetOp::SetRel_SetOp_SET_OP_UNION_ALL){
+        return Status::NotImplemented("substrait::SetRel only supports UnionAll");
+      }
+      if(set.inputs_size() == 0){
+        return Status::Invalid("substrait::SetRel with no input relation");
+      }
+      
+      compute::Declaration union_dec{"union", compute::ExecNodeOptions{}};
+      int num_columns = -1;
+      for(int i = 0; i < set.inputs_size(); i++){
+        ARROW_ASSIGN_OR_RAISE(auto input, 
+                              FromProto(set.inputs(i), ext_set, conversion_options));
+        if(num_columns == -1){
+          num_columns = input.num_columns;
+        }else if(num_columns != input.num_columns){
+          return Status::Invalid("substrait::SetRel must have inputs with same number of columns");
+        }
+
+        //rename all attributes in case inputs have different names
+        std::vector<compute::Expression> expressions;
+        std::vector<std::string> names;
+        for(int i = 0; i < num_columns; i++){
+          expressions.emplace_back(compute::field_ref(FieldRef(i)));
+          names.push_back("a"+std::to_string(i));
+        }
+        auto renamed_input = DeclarationInfo{
+                compute::Declaration::Sequence({
+                  std::move(input.declaration),
+                  {"project", compute::ProjectNodeOptions{std::move(expressions), std::move(names)}},
+                }), num_columns
+              };
+
+        union_dec.inputs.emplace_back(std::move(renamed_input.declaration));
+      }
+      return DeclarationInfo{std::move(union_dec), num_columns};
+    }
 
     default:
       break;
