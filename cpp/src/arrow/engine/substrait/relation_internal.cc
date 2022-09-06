@@ -29,6 +29,7 @@
 #include "arrow/filesystem/localfs.h"
 #include "arrow/filesystem/path_util.h"
 #include "arrow/filesystem/util_internal.h"
+#include "arrow/compute/exec/expression_internal.h"
 
 namespace arrow {
 namespace engine {
@@ -50,6 +51,42 @@ Status CheckRelCommon(const RelMessage& rel) {
     return Status::NotImplemented("substrait AdvancedExtensions");
   }
   return Status::OK();
+}
+
+arrow::Result<arrow::compute::Expression> convertFieldPathToName(const arrow::compute::Expression& expr
+                                      , const arrow::Schema& schema){
+  if(expr.literal())
+    return expr;
+  if(auto ref = expr.field_ref()){
+    if(ref->name()){
+      return expr;
+    }
+    if(auto path = ref->field_path()){
+      auto parameter = *expr.parameter();
+      ARROW_ASSIGN_OR_RAISE(auto field, path->Get(schema));
+      auto flatten_field = field->Flatten();
+      if(flatten_field.size() > 1){
+        return arrow::Status::NotImplemented("Cannot convert nested field");
+      }
+      parameter.ref = arrow::FieldRef(field->name());
+      return arrow::compute::Expression(parameter);
+    } 
+  }
+  auto call = arrow::compute::CallNotNull(expr);
+  auto convert = [&]() -> arrow::Result<arrow::compute::Expression>{
+    auto call_out = *call;
+    for(size_t i = 0; i < call_out.arguments.size(); i++){
+      ARROW_ASSIGN_OR_RAISE(call_out.arguments[i], convertFieldPathToName(call_out.arguments[i], schema));
+    }
+    return arrow::compute::Expression(call_out);
+  };
+  
+  constexpr arrow::util::string_view kleene = "_kleene";
+  if(arrow::compute::Comparison::Get(call->function_name) ||
+      arrow::util::string_view{call->function_name}.ends_with(kleene)){
+    return convert();
+  }
+  return arrow::Status::NotImplemented("Cannot convert fields");
 }
 
 Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet& ext_set,
@@ -75,6 +112,9 @@ Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet&
       if (read.has_filter()) {
         ARROW_ASSIGN_OR_RAISE(scan_options->filter,
                               FromProto(read.filter(), ext_set, conversion_options));
+        ARROW_ASSIGN_OR_RAISE(scan_options->filter,
+                              convertFieldPathToName(scan_options->filter, *base_schema));
+        auto str = scan_options->filter.ToString();
       }
 
       if (read.has_projection()) {
@@ -414,37 +454,39 @@ Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet&
     case substrait::Rel::RelTypeCase::kSet: {
       const auto& set = rel.set();
       RETURN_NOT_OK(CheckRelCommon(set));
-      if(set.op() != substrait::SetRel_SetOp::SetRel_SetOp_SET_OP_UNION_ALL){
+      if (set.op() != substrait::SetRel_SetOp::SetRel_SetOp_SET_OP_UNION_ALL) {
         return Status::NotImplemented("substrait::SetRel only supports UnionAll");
       }
-      if(set.inputs_size() == 0){
+      if (set.inputs_size() == 0) {
         return Status::Invalid("substrait::SetRel with no input relation");
       }
-      
+
       compute::Declaration union_dec{"union", compute::ExecNodeOptions{}};
       int num_columns = -1;
-      for(int i = 0; i < set.inputs_size(); i++){
-        ARROW_ASSIGN_OR_RAISE(auto input, 
+      for (int i = 0; i < set.inputs_size(); i++) {
+        ARROW_ASSIGN_OR_RAISE(auto input,
                               FromProto(set.inputs(i), ext_set, conversion_options));
-        if(num_columns == -1){
+        if (num_columns == -1) {
           num_columns = input.num_columns;
-        }else if(num_columns != input.num_columns){
-          return Status::Invalid("substrait::SetRel must have inputs with same number of columns");
+        } else if (num_columns != input.num_columns) {
+          return Status::Invalid(
+              "substrait::SetRel must have inputs with same number of columns");
         }
 
-        //rename all attributes in case inputs have different names
+        // rename all attributes in case inputs have different names
         std::vector<compute::Expression> expressions;
         std::vector<std::string> names;
-        for(int i = 0; i < num_columns; i++){
+        for (int i = 0; i < num_columns; i++) {
           expressions.emplace_back(compute::field_ref(FieldRef(i)));
-          names.push_back("a"+std::to_string(i));
+          names.push_back("a" + std::to_string(i));
         }
         auto renamed_input = DeclarationInfo{
-                compute::Declaration::Sequence({
-                  std::move(input.declaration),
-                  {"project", compute::ProjectNodeOptions{std::move(expressions), std::move(names)}},
-                }), num_columns
-              };
+            compute::Declaration::Sequence({
+                std::move(input.declaration),
+                {"project",
+                 compute::ProjectNodeOptions{std::move(expressions), std::move(names)}},
+            }),
+            num_columns};
 
         union_dec.inputs.emplace_back(std::move(renamed_input.declaration));
       }
