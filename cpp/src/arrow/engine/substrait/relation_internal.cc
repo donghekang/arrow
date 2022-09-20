@@ -366,8 +366,8 @@ Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet&
         ARROW_ASSIGN_OR_RAISE(
             project_schema,
             project_schema->AddField(
-                num_columns + static_cast<int>(project.expressions().size()) - 1,
-                std::move(project_field)));
+                // num_columns + static_cast<int>(project.expressions().size()) - 1,
+                num_columns + i, std::move(project_field)));
         i++;
         expressions.emplace_back(des_expr);
       }
