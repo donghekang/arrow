@@ -44,13 +44,16 @@ namespace engine {
 
 template <typename RelMessage>
 Result<std::vector<compute::Expression>> GetEmitInfo(
-    const RelMessage& rel, const std::shared_ptr<Schema>& schema) {
+    const RelMessage& rel, const std::shared_ptr<Schema>& schema,
+    FieldVector& out_field_vector) {
   const auto& emit = rel.common().emit();
   int emit_size = emit.output_mapping_size();
   std::vector<compute::Expression> proj_field_refs(emit_size);
+  out_field_vector.clear();
   for (int i = 0; i < emit_size; i++) {
     int32_t map_id = emit.output_mapping(i);
     proj_field_refs[i] = compute::field_ref(FieldRef(map_id));
+    out_field_vector.push_back(schema->field(map_id));
   }
   return std::move(proj_field_refs);
 }
@@ -58,18 +61,20 @@ Result<std::vector<compute::Expression>> GetEmitInfo(
 template <typename RelMessage>
 Result<DeclarationInfo> ProcessEmit(const RelMessage& rel,
                                     const DeclarationInfo& no_emit_declr,
-                                    const std::shared_ptr<Schema>& schema) {
+                                    const std::shared_ptr<Schema>& in_schema) {
   if (rel.has_common()) {
     switch (rel.common().emit_kind_case()) {
       case substrait::RelCommon::EmitKindCase::kDirect:
         return no_emit_declr;
       case substrait::RelCommon::EmitKindCase::kEmit: {
-        ARROW_ASSIGN_OR_RAISE(auto emit_expressions, GetEmitInfo(rel, schema));
+        FieldVector out_fields;
+        ARROW_ASSIGN_OR_RAISE(auto emit_expressions,
+                              GetEmitInfo(rel, in_schema, out_fields));
         return DeclarationInfo{
             compute::Declaration::Sequence(
                 {no_emit_declr.declaration,
                  {"project", compute::ProjectNodeOptions{std::move(emit_expressions)}}}),
-            std::move(schema)};
+            std::move(schema(out_fields))};
       }
       default:
         return Status::Invalid("Invalid emit case");
