@@ -261,7 +261,10 @@ Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet&
               selector.recursive = true;
               ARROW_ASSIGN_OR_RAISE(auto discovered_files,
                                     filesystem->GetFileInfo(selector));
-              std::move(files.begin(), files.end(), std::back_inserter(discovered_files));
+              // std::move(files.begin(), files.end(),
+              // std::back_inserter(discovered_files));
+              std::move(discovered_files.begin(), discovered_files.end(),
+                        std::back_inserter(files));
             }
             break;
           }
