@@ -100,6 +100,8 @@ struct GrouperImpl : Grouper {
   }
 
   Result<Datum> Consume(const ExecSpan& batch) override {
+    startTimer();
+
     std::vector<int32_t> offsets_batch(batch.length + 1);
     for (int i = 0; i < batch.num_values(); ++i) {
       encoders_[i]->AddLength(batch[i], batch.length, offsets_batch.data());
@@ -151,12 +153,16 @@ struct GrouperImpl : Grouper {
     }
 
     ARROW_ASSIGN_OR_RAISE(auto group_ids, group_ids_batch.Finish());
+    endTimer(0);
+
     return Datum(UInt32Array(batch.length, std::move(group_ids)));
   }
 
   uint32_t num_groups() const override { return num_groups_; }
 
   Result<ExecBatch> GetUniques() override {
+    startTimer();
+
     ExecBatch out({}, num_groups_);
 
     std::vector<uint8_t*> key_buf_ptrs(num_groups_);
@@ -171,8 +177,16 @@ struct GrouperImpl : Grouper {
           encoders_[i]->Decode(key_buf_ptrs.data(), static_cast<int32_t>(num_groups_),
                                ctx_->memory_pool()));
     }
+    endTimer(1);
 
     return out;
+  }
+
+  ~GrouperImpl() {
+    printf("GrouperImpl %p has %d groups\n", (void*)this, this->num_groups());
+
+    printf("GrouperImpl %p Consume %f seconds\n", (void*)this, elapsed[0] / 1000000.0);
+    printf("GrouperImpl %p GetUnique %f seconds\n", (void*)this, elapsed[1] / 1000000.0);
   }
 
   ExecContext* ctx_;
@@ -267,7 +281,14 @@ struct GrouperFastImpl : Grouper {
     return std::move(impl);
   }
 
-  ~GrouperFastImpl() { map_.cleanup(); }
+  ~GrouperFastImpl() {
+    printf("GrouperFastImpl %p has %d groups\n", (void*)this, this->num_groups());
+    map_.cleanup();
+    printf("GrouperFastImpl %p Consume %f seconds\n", (void*)this,
+           elapsed[0] / 1000000.0);
+    printf("GrouperFastImpl %p GetUnique %f seconds\n", (void*)this,
+           elapsed[1] / 1000000.0);
+  }
 
   Result<Datum> Consume(const ExecSpan& batch) override {
     // ARROW-14027: broadcast scalar arguments for now
@@ -289,6 +310,8 @@ struct GrouperFastImpl : Grouper {
   }
 
   Result<Datum> ConsumeImpl(const ExecSpan& batch) {
+    startTimer();
+
     int64_t num_rows = batch.length;
     int num_columns = batch.num_values();
     // Process dictionaries
@@ -380,6 +403,8 @@ struct GrouperFastImpl : Grouper {
       }
     }
 
+    endTimer(0);
+
     return Datum(UInt32Array(batch.length, std::move(group_ids)));
   }
 
@@ -402,6 +427,8 @@ struct GrouperFastImpl : Grouper {
   }
 
   Result<ExecBatch> GetUniques() override {
+    startTimer();
+
     auto num_columns = static_cast<uint32_t>(col_metadata_.size());
     int64_t num_groups = rows_.length();
 
@@ -501,7 +528,7 @@ struct GrouperFastImpl : Grouper {
         }
       }
     }
-
+    endTimer(1);
     return out;
   }
 
@@ -589,6 +616,21 @@ Result<std::shared_ptr<ListArray>> Grouper::MakeGroupings(const UInt32Array& ids
   return std::make_shared<ListArray>(
       list(int32()), num_groups, std::move(offsets),
       std::make_shared<Int32Array>(ids.length(), std::move(sort_indices)));
+}
+
+void Grouper::startTimer() {
+  ARROW_CHECK_EQ(start_time.tv_sec, 0);
+  gettimeofday(&start_time, NULL);
+}
+
+void Grouper::endTimer(int id) {
+  if (elapsed.size() <= id) elapsed.resize(id + 1);
+  timeval end;
+  gettimeofday(&end, NULL);
+  elapsed[id] +=
+      ((end.tv_sec - start_time.tv_sec) * 1000000 + (end.tv_usec - start_time.tv_usec));
+  start_time.tv_sec = 0;
+  start_time.tv_usec = 0;
 }
 
 }  // namespace compute

@@ -27,6 +27,8 @@
 #include "arrow/result.h"
 #include "arrow/util/visibility.h"
 
+#include <sys/time.h>
+
 namespace arrow {
 namespace compute {
 
@@ -106,6 +108,12 @@ class ARROW_EXPORT Grouper {
   static Result<std::shared_ptr<ListArray>> ApplyGroupings(
       const ListArray& groupings, const Array& array,
       ExecContext* ctx = default_exec_context());
+
+  timeval start_time;
+  std::vector<uint64_t> elapsed;
+
+  void startTimer();
+  void endTimer(int id);
 };
 
 }  // namespace compute
