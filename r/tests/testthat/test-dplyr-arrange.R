@@ -35,7 +35,19 @@ test_that("arrange() on integer, double, and character columns", {
   )
   compare_dplyr_binding(
     .input %>%
+      arrange(int, dplyr::desc(dbl)) %>%
+      collect(),
+    tbl
+  )
+  compare_dplyr_binding(
+    .input %>%
       arrange(int, desc(desc(dbl))) %>%
+      collect(),
+    tbl
+  )
+  compare_dplyr_binding(
+    .input %>%
+      arrange(int, dplyr::desc(dplyr::desc(dbl))) %>%
       collect(),
     tbl
   )
@@ -43,6 +55,13 @@ test_that("arrange() on integer, double, and character columns", {
     .input %>%
       arrange(int) %>%
       arrange(desc(dbl)) %>%
+      collect(),
+    tbl
+  )
+  compare_dplyr_binding(
+    .input %>%
+      arrange(int) %>%
+      arrange(dplyr::desc(dbl)) %>%
       collect(),
     tbl
   )
@@ -99,7 +118,8 @@ test_that("arrange() on integer, double, and character columns", {
     .input %>%
       group_by(grp) %>%
       arrange(.by_group = TRUE) %>%
-      pull(grp),
+      pull(grp) %>%
+      as.vector(),
     tbl
   )
   compare_dplyr_binding(
@@ -197,6 +217,13 @@ test_that("arrange() with bad inputs", {
     tbl %>%
       Table$create() %>%
       arrange(desc(int, chr)),
+    "expects only one argument",
+    fixed = TRUE
+  )
+  expect_error(
+    tbl %>%
+      Table$create() %>%
+      arrange(dplyr::desc(int, chr)),
     "expects only one argument",
     fixed = TRUE
   )

@@ -18,16 +18,19 @@ package exec
 
 import (
 	"fmt"
+	"math"
 	"reflect"
+	"sync/atomic"
 	"unsafe"
 
-	"github.com/apache/arrow/go/v10/arrow"
-	"github.com/apache/arrow/go/v10/arrow/array"
-	"github.com/apache/arrow/go/v10/arrow/decimal128"
-	"github.com/apache/arrow/go/v10/arrow/decimal256"
-	"github.com/apache/arrow/go/v10/arrow/float16"
-	"github.com/apache/arrow/go/v10/arrow/memory"
+	"github.com/apache/arrow/go/v11/arrow"
+	"github.com/apache/arrow/go/v11/arrow/array"
+	"github.com/apache/arrow/go/v11/arrow/decimal128"
+	"github.com/apache/arrow/go/v11/arrow/decimal256"
+	"github.com/apache/arrow/go/v11/arrow/float16"
+	"github.com/apache/arrow/go/v11/arrow/memory"
 	"golang.org/x/exp/constraints"
+	"golang.org/x/exp/slices"
 )
 
 // IntTypes is a type constraint for raw values represented as signed
@@ -88,6 +91,14 @@ type TemporalTypes interface {
 		arrow.MonthInterval | arrow.MonthDayNanoInterval
 }
 
+func GetValues[T FixedWidthTypes](data arrow.ArrayData, i int) []T {
+	if data.Buffers()[i] == nil || data.Buffers()[i].Len() == 0 {
+		return nil
+	}
+	ret := unsafe.Slice((*T)(unsafe.Pointer(&data.Buffers()[i].Bytes()[0])), data.Offset()+data.Len())
+	return ret[data.Offset():]
+}
+
 // GetSpanValues returns a properly typed slice bye reinterpreting
 // the buffer at index i using unsafe.Slice. This will take into account
 // the offset of the given ArraySpan.
@@ -124,6 +135,13 @@ func Min[T constraints.Ordered](a, b T) T {
 	return b
 }
 
+func Max[T constraints.Ordered](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // OptionsInit should be used in the case where a KernelState is simply
 // represented with a specific type by value (instead of pointer).
 // This will initialize the KernelState as a value-copied instance of
@@ -154,11 +172,24 @@ var typMap = map[reflect.Type]arrow.DataType{
 	reflect.TypeOf(arrow.Date32(0)): arrow.FixedWidthTypes.Date32,
 	reflect.TypeOf(arrow.Date64(0)): arrow.FixedWidthTypes.Date64,
 	reflect.TypeOf(true):            arrow.FixedWidthTypes.Boolean,
+	reflect.TypeOf(float16.Num{}):   arrow.FixedWidthTypes.Float16,
 }
 
-func GetDataType[T NumericTypes | bool | string]() arrow.DataType {
+// GetDataType returns the appropriate arrow.DataType for the given type T
+// only for non-parametric types. This uses a map and reflection internally
+// so don't call this in a tight loop, instead call this once and then use
+// a closure with the result.
+func GetDataType[T NumericTypes | bool | string | float16.Num]() arrow.DataType {
 	var z T
 	return typMap[reflect.TypeOf(z)]
+}
+
+// GetType returns the appropriate arrow.Type type T, only for non-parameteric
+// types. This uses a map and reflection internally so don't call this in
+// a tight loop, instead call it once and then use a closure with the result.
+func GetType[T NumericTypes | bool | string]() arrow.Type {
+	var z T
+	return typMap[reflect.TypeOf(z)].ID()
 }
 
 type arrayBuilder[T NumericTypes] interface {
@@ -173,4 +204,102 @@ func ArrayFromSlice[T NumericTypes](mem memory.Allocator, data []T) arrow.Array 
 
 	bldr.AppendValues(data, nil)
 	return bldr.NewArray()
+}
+
+func RechunkArraysConsistently(groups [][]arrow.Array) [][]arrow.Array {
+	if len(groups) <= 1 {
+		return groups
+	}
+
+	var totalLen int
+	for _, a := range groups[0] {
+		totalLen += a.Len()
+	}
+
+	if totalLen == 0 {
+		return groups
+	}
+
+	rechunked := make([][]arrow.Array, len(groups))
+	offsets := make([]int, len(groups))
+	// scan all array vectors at once, rechunking along the way
+	var start int64
+	for start < int64(totalLen) {
+		// first compute max possible length for next chunk
+		chunkLength := math.MaxInt64
+		for i, g := range groups {
+			offset := offsets[i]
+			// skip any done arrays including 0-length
+			for offset == g[0].Len() {
+				g = g[1:]
+				offset = 0
+			}
+			arr := g[0]
+			chunkLength = Min(chunkLength, arr.Len()-offset)
+
+			offsets[i] = offset
+			groups[i] = g
+		}
+
+		// now slice all the arrays along this chunk size
+		for i, g := range groups {
+			offset := offsets[i]
+			arr := g[0]
+			if offset == 0 && arr.Len() == chunkLength {
+				// slice spans entire array
+				arr.Retain()
+				rechunked[i] = append(rechunked[i], arr)
+			} else {
+				rechunked[i] = append(rechunked[i], array.NewSlice(arr, int64(offset), int64(offset+chunkLength)))
+			}
+			offsets[i] += chunkLength
+		}
+
+		start += int64(chunkLength)
+	}
+	return rechunked
+}
+
+type ChunkResolver struct {
+	offsets []int64
+	cached  int64
+}
+
+func NewChunkResolver(chunks []arrow.Array) *ChunkResolver {
+	offsets := make([]int64, len(chunks)+1)
+	var offset int64
+	for i, c := range chunks {
+		curOffset := offset
+		offset += int64(c.Len())
+		offsets[i] = curOffset
+	}
+	offsets[len(chunks)] = offset
+	return &ChunkResolver{offsets: offsets}
+}
+
+func (c *ChunkResolver) Resolve(idx int64) (chunk, index int64) {
+	// some algorithms consecutively access indexes that are a
+	// relatively small distance from each other, falling into
+	// the same chunk.
+	// This is trivial when merging (assuming each side of the
+	// merge uses its own resolver), but also in the inner
+	// recursive invocations of partitioning.
+	if len(c.offsets) <= 1 {
+		return 0, idx
+	}
+
+	cached := atomic.LoadInt64(&c.cached)
+	cacheHit := idx >= c.offsets[cached] && idx < c.offsets[cached+1]
+	if cacheHit {
+		return cached, idx - c.offsets[cached]
+	}
+
+	chkIdx, found := slices.BinarySearch(c.offsets, idx)
+	if !found {
+		chkIdx--
+	}
+
+	chunk, index = int64(chkIdx), idx-c.offsets[chkIdx]
+	atomic.StoreInt64(&c.cached, chunk)
+	return
 }

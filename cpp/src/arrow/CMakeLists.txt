@@ -397,6 +397,7 @@ if(ARROW_COMPUTE)
        compute/exec/hash_join_node.cc
        compute/exec/key_hash.cc
        compute/exec/key_map.cc
+       compute/exec/map_node.cc
        compute/exec/order_by_impl.cc
        compute/exec/partition_util.cc
        compute/exec/options.cc
@@ -425,6 +426,7 @@ if(ARROW_COMPUTE)
        compute/kernels/scalar_boolean.cc
        compute/kernels/scalar_cast_boolean.cc
        compute/kernels/scalar_cast_dictionary.cc
+       compute/kernels/scalar_cast_extension.cc
        compute/kernels/scalar_cast_internal.cc
        compute/kernels/scalar_cast_nested.cc
        compute/kernels/scalar_cast_numeric.cc

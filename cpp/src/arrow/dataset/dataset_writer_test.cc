@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "arrow/array/builder_primitive.h"
@@ -30,7 +31,6 @@
 #include "arrow/table.h"
 #include "arrow/testing/future_util.h"
 #include "arrow/testing/gtest_util.h"
-#include "arrow/util/optional.h"
 #include "gtest/gtest.h"
 
 namespace arrow {
@@ -114,13 +114,13 @@ class DatasetWriterTestFixture : public testing::Test {
     return batch;
   }
 
-  util::optional<MockFileInfo> FindFile(const std::string& filename) {
+  std::optional<MockFileInfo> FindFile(const std::string& filename) {
     for (const auto& mock_file : filesystem_->AllFiles()) {
       if (mock_file.full_path == filename) {
         return mock_file;
       }
     }
-    return util::nullopt;
+    return std::nullopt;
   }
 
   void AssertVisited(const std::vector<std::string>& actual_paths,
@@ -130,7 +130,7 @@ class DatasetWriterTestFixture : public testing::Test {
         << "The file " << expected_path << " was not in the list of files visited";
   }
 
-  std::shared_ptr<RecordBatch> ReadAsBatch(util::string_view data, int* num_batches) {
+  std::shared_ptr<RecordBatch> ReadAsBatch(std::string_view data, int* num_batches) {
     std::shared_ptr<io::RandomAccessFile> in_stream =
         std::make_shared<io::BufferReader>(data);
     EXPECT_OK_AND_ASSIGN(std::shared_ptr<ipc::RecordBatchFileReader> reader,
@@ -150,7 +150,7 @@ class DatasetWriterTestFixture : public testing::Test {
     return batch;
   }
 
-  void AssertFileCreated(const util::optional<MockFileInfo>& maybe_file,
+  void AssertFileCreated(const std::optional<MockFileInfo>& maybe_file,
                          const std::string& expected_filename) {
     ASSERT_TRUE(maybe_file.has_value())
         << "The file " << expected_filename << " was not created";
@@ -167,7 +167,7 @@ class DatasetWriterTestFixture : public testing::Test {
   void AssertCreatedData(const std::vector<ExpectedFile>& expected_files) {
     counter_ = 0;
     for (const auto& expected_file : expected_files) {
-      util::optional<MockFileInfo> written_file = FindFile(expected_file.filename);
+      std::optional<MockFileInfo> written_file = FindFile(expected_file.filename);
       AssertFileCreated(written_file, expected_file.filename);
       int num_batches = 0;
       AssertBatchesEqual(*MakeBatch(expected_file.start, expected_file.num_rows),
@@ -178,21 +178,21 @@ class DatasetWriterTestFixture : public testing::Test {
 
   void AssertFilesCreated(const std::vector<std::string>& expected_files) {
     for (const std::string& expected_file : expected_files) {
-      util::optional<MockFileInfo> written_file = FindFile(expected_file);
+      std::optional<MockFileInfo> written_file = FindFile(expected_file);
       AssertFileCreated(written_file, expected_file);
     }
   }
 
   void AssertNotFiles(const std::vector<std::string>& expected_non_files) {
     for (const auto& expected_non_file : expected_non_files) {
-      util::optional<MockFileInfo> file = FindFile(expected_non_file);
+      std::optional<MockFileInfo> file = FindFile(expected_non_file);
       ASSERT_FALSE(file.has_value());
     }
   }
 
   void AssertEmptyFiles(const std::vector<std::string>& expected_empty_files) {
     for (const auto& expected_empty_file : expected_empty_files) {
-      util::optional<MockFileInfo> file = FindFile(expected_empty_file);
+      std::optional<MockFileInfo> file = FindFile(expected_empty_file);
       ASSERT_TRUE(file.has_value());
       ASSERT_EQ("", file->data);
     }
@@ -232,6 +232,18 @@ TEST_F(DatasetWriterTestFixture, BasicFileDirectoryPrefix) {
   AssertFinished(queue_fut);
   EndWriterChecked(dataset_writer.get());
   AssertFilesCreated({"testdir/a/1_chunk-0.arrow"});
+}
+
+TEST_F(DatasetWriterTestFixture, DirectoryCreateFails) {
+  // This should fail to be created
+  write_options_.base_dir = "///doesnotexist";
+  EXPECT_OK_AND_ASSIGN(auto dataset_writer,
+                       DatasetWriter::Make(write_options_, scheduler_.get()));
+  Future<> queue_fut = dataset_writer->WriteRecordBatch(MakeBatch(100), "a", "1_");
+  AssertFinished(queue_fut);
+  ASSERT_OK(dataset_writer->Finish());
+  scheduler_->End();
+  ASSERT_FINISHES_AND_RAISES(Invalid, scheduler_->OnFinished());
 }
 
 TEST_F(DatasetWriterTestFixture, MaxRowsOneWrite) {

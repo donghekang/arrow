@@ -26,20 +26,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apache/arrow/go/v10/arrow"
-	"github.com/apache/arrow/go/v10/arrow/array"
-	"github.com/apache/arrow/go/v10/arrow/bitutil"
-	"github.com/apache/arrow/go/v10/arrow/decimal128"
-	"github.com/apache/arrow/go/v10/arrow/memory"
-	"github.com/apache/arrow/go/v10/internal/bitutils"
-	"github.com/apache/arrow/go/v10/internal/utils"
-	"github.com/apache/arrow/go/v10/parquet"
-	"github.com/apache/arrow/go/v10/parquet/compress"
-	"github.com/apache/arrow/go/v10/parquet/file"
-	"github.com/apache/arrow/go/v10/parquet/internal/encoding"
-	"github.com/apache/arrow/go/v10/parquet/internal/testutils"
-	"github.com/apache/arrow/go/v10/parquet/pqarrow"
-	"github.com/apache/arrow/go/v10/parquet/schema"
+	"github.com/apache/arrow/go/v11/arrow"
+	"github.com/apache/arrow/go/v11/arrow/array"
+	"github.com/apache/arrow/go/v11/arrow/bitutil"
+	"github.com/apache/arrow/go/v11/arrow/decimal128"
+	"github.com/apache/arrow/go/v11/arrow/memory"
+	"github.com/apache/arrow/go/v11/internal/bitutils"
+	"github.com/apache/arrow/go/v11/internal/utils"
+	"github.com/apache/arrow/go/v11/parquet"
+	"github.com/apache/arrow/go/v11/parquet/compress"
+	"github.com/apache/arrow/go/v11/parquet/file"
+	"github.com/apache/arrow/go/v11/parquet/internal/encoding"
+	"github.com/apache/arrow/go/v11/parquet/internal/testutils"
+	"github.com/apache/arrow/go/v11/parquet/pqarrow"
+	"github.com/apache/arrow/go/v11/parquet/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -1286,6 +1286,42 @@ func (ps *ParquetIOTestSuite) TestNull() {
 	)
 
 	ps.roundTripTable(expected, true)
+}
+
+// ARROW-17169
+func (ps *ParquetIOTestSuite) TestNullableListOfStruct() {
+	bldr := array.NewListBuilder(memory.DefaultAllocator, arrow.StructOf(
+		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int32},
+		arrow.Field{Name: "b", Type: arrow.BinaryTypes.String},
+	))
+	defer bldr.Release()
+
+	stBldr := bldr.ValueBuilder().(*array.StructBuilder)
+	aBldr := stBldr.FieldBuilder(0).(*array.Int32Builder)
+	bBldr := stBldr.FieldBuilder(1).(*array.StringBuilder)
+
+	for i := 0; i < 320; i++ {
+		if i%5 == 0 {
+			bldr.AppendNull()
+			continue
+		}
+		bldr.Append(true)
+		for j := 0; j < 4; j++ {
+			stBldr.Append(true)
+			aBldr.Append(int32(i + j))
+			bBldr.Append(strconv.Itoa(i + j))
+		}
+	}
+
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	field := arrow.Field{Name: "x", Type: arr.DataType(), Nullable: true}
+	expected := array.NewTable(arrow.NewSchema([]arrow.Field{field}, nil),
+		[]arrow.Column{*arrow.NewColumn(field, arrow.NewChunked(field.Type, []arrow.Array{arr}))}, -1)
+	defer expected.Release()
+
+	ps.roundTripTable(expected, false)
 }
 
 func TestParquetArrowIO(t *testing.T) {

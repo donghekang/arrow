@@ -22,12 +22,12 @@ import (
 	"math"
 	"math/bits"
 
-	"github.com/apache/arrow/go/v10/arrow"
-	"github.com/apache/arrow/go/v10/arrow/bitutil"
-	"github.com/apache/arrow/go/v10/arrow/internal/debug"
-	"github.com/apache/arrow/go/v10/arrow/memory"
-	"github.com/apache/arrow/go/v10/internal/bitutils"
-	"github.com/apache/arrow/go/v10/internal/utils"
+	"github.com/apache/arrow/go/v11/arrow"
+	"github.com/apache/arrow/go/v11/arrow/bitutil"
+	"github.com/apache/arrow/go/v11/arrow/internal/debug"
+	"github.com/apache/arrow/go/v11/arrow/memory"
+	"github.com/apache/arrow/go/v11/internal/bitutils"
+	"github.com/apache/arrow/go/v11/internal/utils"
 )
 
 // Concatenate creates a new arrow.Array which is the concatenation of the
@@ -382,7 +382,12 @@ func concat(data []arrow.ArrayData, mem memory.Allocator) (arrow.ArrayData, erro
 		out.buffers[0] = bm
 	}
 
-	switch dt := out.dtype.(type) {
+	dt := out.dtype
+	if dt.ID() == arrow.EXTENSION {
+		dt = dt.(arrow.ExtensionType).StorageType()
+	}
+
+	switch dt := dt.(type) {
 	case *arrow.NullType:
 	case *arrow.BooleanType:
 		bm, err := concatBitmaps(gatherBitmaps(data, 1), mem)

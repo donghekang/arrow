@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/apache/arrow/go/v10/arrow"
-	"github.com/apache/arrow/go/v10/arrow/bitutil"
-	"github.com/apache/arrow/go/v10/arrow/compute/internal/exec"
-	"github.com/apache/arrow/go/v10/arrow/memory"
-	"github.com/apache/arrow/go/v10/internal/bitutils"
+	"github.com/apache/arrow/go/v11/arrow"
+	"github.com/apache/arrow/go/v11/arrow/bitutil"
+	"github.com/apache/arrow/go/v11/arrow/compute/internal/exec"
+	"github.com/apache/arrow/go/v11/arrow/internal/debug"
+	"github.com/apache/arrow/go/v11/arrow/memory"
+	"github.com/apache/arrow/go/v11/arrow/scalar"
+	"github.com/apache/arrow/go/v11/internal/bitutils"
 	"golang.org/x/exp/constraints"
 )
 
@@ -156,6 +158,170 @@ func ScalarUnaryBoolArg[OutT exec.FixedWidthTypes](op func(*exec.KernelCtx, []by
 	return func(ctx *exec.KernelCtx, input *exec.ExecSpan, out *exec.ExecResult) error {
 		outData := exec.GetSpanValues[OutT](out, 1)
 		return op(ctx, input.Values[0].Array.Buffers[1].Buf, outData)
+	}
+}
+
+func UnboxScalar[T exec.FixedWidthTypes](val scalar.PrimitiveScalar) T {
+	return *(*T)(unsafe.Pointer(&val.Data()[0]))
+}
+
+func UnboxBinaryScalar(val scalar.BinaryScalar) []byte {
+	if !val.IsValid() {
+		return nil
+	}
+	return val.Data()
+}
+
+type arrArrFn[OutT, Arg0T, Arg1T exec.FixedWidthTypes] func(*exec.KernelCtx, []Arg0T, []Arg1T, []OutT) error
+type arrScalarFn[OutT, Arg0T, Arg1T exec.FixedWidthTypes] func(*exec.KernelCtx, []Arg0T, Arg1T, []OutT) error
+type scalarArrFn[OutT, Arg0T, Arg1T exec.FixedWidthTypes] func(*exec.KernelCtx, Arg0T, []Arg1T, []OutT) error
+
+type binaryOps[OutT, Arg0T, Arg1T exec.FixedWidthTypes] struct {
+	arrArr    arrArrFn[OutT, Arg0T, Arg1T]
+	arrScalar arrScalarFn[OutT, Arg0T, Arg1T]
+	scalarArr scalarArrFn[OutT, Arg0T, Arg1T]
+}
+
+func ScalarBinary[OutT, Arg0T, Arg1T exec.FixedWidthTypes](ops binaryOps[OutT, Arg0T, Arg1T]) exec.ArrayKernelExec {
+	arrayArray := func(ctx *exec.KernelCtx, arg0, arg1 *exec.ArraySpan, out *exec.ExecResult) error {
+		var (
+			a0      = exec.GetSpanValues[Arg0T](arg0, 1)
+			a1      = exec.GetSpanValues[Arg1T](arg1, 1)
+			outData = exec.GetSpanValues[OutT](out, 1)
+		)
+		return ops.arrArr(ctx, a0, a1, outData)
+	}
+
+	arrayScalar := func(ctx *exec.KernelCtx, arg0 *exec.ArraySpan, arg1 scalar.Scalar, out *exec.ExecResult) error {
+		var (
+			a0      = exec.GetSpanValues[Arg0T](arg0, 1)
+			a1      = UnboxScalar[Arg1T](arg1.(scalar.PrimitiveScalar))
+			outData = exec.GetSpanValues[OutT](out, 1)
+		)
+		return ops.arrScalar(ctx, a0, a1, outData)
+	}
+
+	scalarArray := func(ctx *exec.KernelCtx, arg0 scalar.Scalar, arg1 *exec.ArraySpan, out *exec.ExecResult) error {
+		var (
+			a0      = UnboxScalar[Arg0T](arg0.(scalar.PrimitiveScalar))
+			a1      = exec.GetSpanValues[Arg1T](arg1, 1)
+			outData = exec.GetSpanValues[OutT](out, 1)
+		)
+		return ops.scalarArr(ctx, a0, a1, outData)
+	}
+
+	return func(ctx *exec.KernelCtx, batch *exec.ExecSpan, out *exec.ExecResult) error {
+		if batch.Values[0].IsArray() {
+			if batch.Values[1].IsArray() {
+				return arrayArray(ctx, &batch.Values[0].Array, &batch.Values[1].Array, out)
+			}
+			return arrayScalar(ctx, &batch.Values[0].Array, batch.Values[1].Scalar, out)
+		}
+
+		if batch.Values[1].IsArray() {
+			return scalarArray(ctx, batch.Values[0].Scalar, &batch.Values[1].Array, out)
+		}
+
+		debug.Assert(false, "should be unreachable")
+		return fmt.Errorf("%w: scalar binary with two scalars?", arrow.ErrInvalid)
+	}
+}
+
+func ScalarBinaryNotNull[OutT, Arg0T, Arg1T exec.FixedWidthTypes](op func(*exec.KernelCtx, Arg0T, Arg1T, *error) OutT) exec.ArrayKernelExec {
+	arrayArray := func(ctx *exec.KernelCtx, arg0, arg1 *exec.ArraySpan, out *exec.ExecResult) (err error) {
+		// fast path if one side is entirely null
+		if arg0.UpdateNullCount() == arg0.Len || arg1.UpdateNullCount() == arg1.Len {
+			return nil
+		}
+
+		var (
+			a0      = exec.GetSpanValues[Arg0T](arg0, 1)
+			a1      = exec.GetSpanValues[Arg1T](arg1, 1)
+			outData = exec.GetSpanValues[OutT](out, 1)
+			outPos  int64
+			def     OutT
+		)
+		bitutils.VisitTwoBitBlocks(arg0.Buffers[0].Buf, arg1.Buffers[0].Buf, arg0.Offset, arg1.Offset, out.Len,
+			func(pos int64) {
+				outData[outPos] = op(ctx, a0[pos], a1[pos], &err)
+				outPos++
+			}, func() {
+				outData[outPos] = def
+				outPos++
+			})
+		return
+	}
+
+	arrayScalar := func(ctx *exec.KernelCtx, arg0 *exec.ArraySpan, arg1 scalar.Scalar, out *exec.ExecResult) (err error) {
+		// fast path if one side is entirely null
+		if arg0.UpdateNullCount() == arg0.Len || !arg1.IsValid() {
+			return nil
+		}
+
+		var (
+			a0      = exec.GetSpanValues[Arg0T](arg0, 1)
+			outData = exec.GetSpanValues[OutT](out, 1)
+			outPos  int64
+			def     OutT
+		)
+		if !arg1.IsValid() {
+			return nil
+		}
+
+		a1 := UnboxScalar[Arg1T](arg1.(scalar.PrimitiveScalar))
+		bitutils.VisitBitBlocks(arg0.Buffers[0].Buf, arg0.Offset, arg0.Len,
+			func(pos int64) {
+				outData[outPos] = op(ctx, a0[pos], a1, &err)
+				outPos++
+			}, func() {
+				outData[outPos] = def
+				outPos++
+			})
+		return
+	}
+
+	scalarArray := func(ctx *exec.KernelCtx, arg0 scalar.Scalar, arg1 *exec.ArraySpan, out *exec.ExecResult) (err error) {
+		// fast path if one side is entirely null
+		if arg1.UpdateNullCount() == arg1.Len || !arg0.IsValid() {
+			return nil
+		}
+
+		var (
+			a1      = exec.GetSpanValues[Arg1T](arg1, 1)
+			outData = exec.GetSpanValues[OutT](out, 1)
+			outPos  int64
+			def     OutT
+		)
+		if !arg0.IsValid() {
+			return nil
+		}
+
+		a0 := UnboxScalar[Arg0T](arg0.(scalar.PrimitiveScalar))
+		bitutils.VisitBitBlocks(arg1.Buffers[0].Buf, arg1.Offset, arg1.Len,
+			func(pos int64) {
+				outData[outPos] = op(ctx, a0, a1[pos], &err)
+				outPos++
+			}, func() {
+				outData[outPos] = def
+				outPos++
+			})
+		return
+	}
+
+	return func(ctx *exec.KernelCtx, batch *exec.ExecSpan, out *exec.ExecResult) error {
+		if batch.Values[0].IsArray() {
+			if batch.Values[1].IsArray() {
+				return arrayArray(ctx, &batch.Values[0].Array, &batch.Values[1].Array, out)
+			}
+			return arrayScalar(ctx, &batch.Values[0].Array, batch.Values[1].Scalar, out)
+		}
+
+		if batch.Values[1].IsArray() {
+			return scalarArray(ctx, batch.Values[0].Scalar, &batch.Values[1].Array, out)
+		}
+
+		debug.Assert(false, "should be unreachable")
+		return fmt.Errorf("%w: scalar binary with two scalars?", arrow.ErrInvalid)
 	}
 }
 
@@ -422,7 +588,7 @@ func castNumberToNumberUnsafe(in, out *exec.ArraySpan) {
 	castNumericUnsafe(in.Type.ID(), out.Type.ID(), in.Buffers[1].Buf[inputOffset:], out.Buffers[1].Buf[outputOffset:], int(in.Len))
 }
 
-func maxDecimalDigitsForInt(id arrow.Type) (int32, error) {
+func MaxDecimalDigitsForInt(id arrow.Type) (int32, error) {
 	switch id {
 	case arrow.INT8, arrow.UINT8:
 		return 3, nil
@@ -450,6 +616,58 @@ func resolveToFirstType(_ *exec.KernelCtx, args []arrow.DataType) (arrow.DataTyp
 }
 
 var OutputFirstType = exec.NewComputedOutputType(resolveToFirstType)
+
+func resolveDecimalBinaryOpOutput(types []arrow.DataType, resolver func(prec1, scale1, prec2, scale2 int32) (prec, scale int32)) (arrow.DataType, error) {
+	leftType, rightType := types[0].(arrow.DecimalType), types[1].(arrow.DecimalType)
+	debug.Assert(leftType.ID() == rightType.ID(), "decimal binary ops should have casted to the same type")
+
+	prec, scale := resolver(leftType.GetPrecision(), leftType.GetScale(),
+		rightType.GetPrecision(), rightType.GetScale())
+
+	return arrow.NewDecimalType(leftType.ID(), prec, scale)
+}
+
+func resolveDecimalAddOrSubtractType(_ *exec.KernelCtx, args []arrow.DataType) (arrow.DataType, error) {
+	return resolveDecimalBinaryOpOutput(args,
+		func(prec1, scale1, prec2, scale2 int32) (prec int32, scale int32) {
+			debug.Assert(scale1 == scale2, "decimal operations should use the same scale")
+			scale = scale1
+			prec = exec.Max(prec1-scale1, prec2-scale2) + scale + 1
+			return
+		})
+}
+
+func resolveDecimalMultiplyOutput(_ *exec.KernelCtx, args []arrow.DataType) (arrow.DataType, error) {
+	return resolveDecimalBinaryOpOutput(args,
+		func(prec1, scale1, prec2, scale2 int32) (prec int32, scale int32) {
+			scale = scale1 + scale2
+			prec = prec1 + prec2 + 1
+			return
+		})
+}
+
+func resolveDecimalDivideOutput(_ *exec.KernelCtx, args []arrow.DataType) (arrow.DataType, error) {
+	return resolveDecimalBinaryOpOutput(args,
+		func(prec1, scale1, prec2, scale2 int32) (prec int32, scale int32) {
+			debug.Assert(scale1 >= scale2, "when dividing decimal values numerator scale should be greater/equal to denom scale")
+			scale = scale1 - scale2
+			prec = prec1
+			return
+		})
+}
+
+func resolveTemporalOutput(_ *exec.KernelCtx, args []arrow.DataType) (arrow.DataType, error) {
+	debug.Assert(args[0].ID() == args[1].ID(), "should only be used on the same types")
+	leftType, rightType := args[0].(*arrow.TimestampType), args[1].(*arrow.TimestampType)
+	debug.Assert(leftType.Unit == rightType.Unit, "should match units")
+
+	if (leftType.TimeZone == "" || rightType.TimeZone == "") && (leftType.TimeZone != rightType.TimeZone) {
+		return nil, fmt.Errorf("%w: subtraction of zoned and non-zoned times is ambiguous (%s, %s)",
+			arrow.ErrInvalid, leftType.TimeZone, rightType.TimeZone)
+	}
+
+	return &arrow.DurationType{Unit: rightType.Unit}, nil
+}
 
 type validityBuilder struct {
 	mem    memory.Allocator
@@ -579,6 +797,10 @@ func (bldr *execBufBuilder) unsafeAdvance(n int) {
 }
 
 func (bldr *execBufBuilder) finish() (buf *memory.Buffer) {
+	if bldr.buffer == nil {
+		buf = memory.NewBufferBytes(nil)
+		return
+	}
 	bldr.buffer.Resize(bldr.sz)
 	buf = bldr.buffer
 	bldr.buffer, bldr.sz = nil, 0
@@ -644,4 +866,69 @@ func (b *bufferBuilder[T]) appendSlice(values []T) {
 
 func (b *bufferBuilder[T]) cap() int {
 	return cap(b.data) / int(unsafe.Sizeof(b.zero))
+}
+
+func checkIndexBoundsImpl[T exec.IntTypes | exec.UintTypes](values *exec.ArraySpan, upperLimit uint64) error {
+	// for unsigned integers, if the values array is larger
+	// than the maximum index value, then there's no need to bounds check
+	isSigned := !arrow.IsUnsignedInteger(values.Type.ID())
+	if !isSigned && upperLimit > uint64(MaxOf[T]()) {
+		return nil
+	}
+
+	valuesData := exec.GetSpanValues[T](values, 1)
+	bitmap := values.Buffers[0].Buf
+	isOutOfBounds := func(val T) bool {
+		return ((isSigned && val < 0) || val >= 0 && uint64(val) >= upperLimit)
+	}
+	return bitutils.VisitSetBitRuns(bitmap, values.Offset, values.Len,
+		func(pos, length int64) error {
+			outOfBounds := false
+			for i := int64(0); i < length; i++ {
+				outOfBounds = outOfBounds || isOutOfBounds(valuesData[pos+i])
+			}
+			if outOfBounds {
+				for i := int64(0); i < length; i++ {
+					if isOutOfBounds(valuesData[pos+i]) {
+						return fmt.Errorf("%w: %d out of bounds",
+							arrow.ErrIndex, valuesData[pos+i])
+					}
+				}
+			}
+			return nil
+		})
+}
+
+func checkIndexBounds(values *exec.ArraySpan, upperLimit uint64) error {
+	switch values.Type.ID() {
+	case arrow.INT8:
+		return checkIndexBoundsImpl[int8](values, upperLimit)
+	case arrow.UINT8:
+		return checkIndexBoundsImpl[uint8](values, upperLimit)
+	case arrow.INT16:
+		return checkIndexBoundsImpl[int16](values, upperLimit)
+	case arrow.UINT16:
+		return checkIndexBoundsImpl[uint16](values, upperLimit)
+	case arrow.INT32:
+		return checkIndexBoundsImpl[int32](values, upperLimit)
+	case arrow.UINT32:
+		return checkIndexBoundsImpl[uint32](values, upperLimit)
+	case arrow.INT64:
+		return checkIndexBoundsImpl[int64](values, upperLimit)
+	case arrow.UINT64:
+		return checkIndexBoundsImpl[uint64](values, upperLimit)
+	default:
+		return fmt.Errorf("%w: invalid index type for bounds checking", arrow.ErrInvalid)
+	}
+}
+
+func checkIndexBoundsChunked(values *arrow.Chunked, upperLimit uint64) error {
+	var span exec.ArraySpan
+	for _, v := range values.Chunks() {
+		span.SetMembers(v.Data())
+		if err := checkIndexBounds(&span, upperLimit); err != nil {
+			return err
+		}
+	}
+	return nil
 }

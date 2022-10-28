@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/apache/arrow/go/v10/arrow"
-	"github.com/apache/arrow/go/v10/arrow/float16"
+	"github.com/apache/arrow/go/v11/arrow"
+	"github.com/apache/arrow/go/v11/arrow/float16"
 )
 
 // RecordEqual reports whether the two provided records are equal.
@@ -117,7 +117,7 @@ func ChunkedEqual(left, right *arrow.Chunked) bool {
 		return false
 	}
 
-	var isequal bool
+	var isequal bool = true
 	chunkedBinaryApply(left, right, func(left arrow.Array, lbeg, lend int64, right arrow.Array, rbeg, rend int64) bool {
 		isequal = SliceEqual(left, lbeg, lend, right, rbeg, rend)
 		return isequal

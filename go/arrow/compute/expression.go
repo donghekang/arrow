@@ -27,14 +27,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/apache/arrow/go/v10/arrow"
-	"github.com/apache/arrow/go/v10/arrow/array"
-	"github.com/apache/arrow/go/v10/arrow/compute/internal/exec"
-	"github.com/apache/arrow/go/v10/arrow/compute/internal/kernels"
-	"github.com/apache/arrow/go/v10/arrow/internal/debug"
-	"github.com/apache/arrow/go/v10/arrow/ipc"
-	"github.com/apache/arrow/go/v10/arrow/memory"
-	"github.com/apache/arrow/go/v10/arrow/scalar"
+	"github.com/apache/arrow/go/v11/arrow"
+	"github.com/apache/arrow/go/v11/arrow/array"
+	"github.com/apache/arrow/go/v11/arrow/compute/internal/exec"
+	"github.com/apache/arrow/go/v11/arrow/compute/internal/kernels"
+	"github.com/apache/arrow/go/v11/arrow/internal/debug"
+	"github.com/apache/arrow/go/v11/arrow/ipc"
+	"github.com/apache/arrow/go/v11/arrow/memory"
+	"github.com/apache/arrow/go/v11/arrow/scalar"
 )
 
 var hashSeed = maphash.MakeSeed()
@@ -484,17 +484,21 @@ const (
 	SelectionDropNulls = kernels.DropNulls
 )
 
-type FilterOptions = kernels.FilterOptions
-
-func DefaultFilterOptions() *FilterOptions { return &FilterOptions{} }
-
 type ArithmeticOptions struct {
-	CheckOverflow bool `compute:"check_overflow"`
+	NoCheckOverflow bool `compute:"check_overflow"`
 }
 
 func (ArithmeticOptions) TypeName() string { return "ArithmeticOptions" }
 
-type CastOptions = kernels.CastOptions
+type (
+	CastOptions   = kernels.CastOptions
+	FilterOptions = kernels.FilterOptions
+	TakeOptions   = kernels.TakeOptions
+)
+
+func DefaultFilterOptions() *FilterOptions { return &FilterOptions{} }
+
+func DefaultTakeOptions() *TakeOptions { return &TakeOptions{BoundsCheck: true} }
 
 func DefaultCastOptions(safe bool) *CastOptions {
 	if safe {
