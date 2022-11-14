@@ -469,6 +469,10 @@ Status RowArrayMerge::PrepareForMerge(RowArray* target,
   target->rows_.Clean();
   RETURN_NOT_OK(target->rows_.AppendEmpty(static_cast<uint32_t>(num_rows),
                                           static_cast<uint32_t>(num_bytes)));
+  printf(
+      "RowArrayMerge::PrepareForMerge: append empty %ld rows and %ld bytes (actually "
+      "request %u bytes)\n",
+      num_rows, num_bytes, static_cast<uint32_t>(num_bytes));
 
   // In case of varying length rows,
   // initialize the first row offset for each range of rows corresponding to a
@@ -479,10 +483,19 @@ Status RowArrayMerge::PrepareForMerge(RowArray* target,
     num_bytes = 0;
     for (size_t i = 0; i < sources.size(); ++i) {
       target->rows_.mutable_offsets()[num_rows] = static_cast<uint32_t>(num_bytes);
+      printf(
+          "RowArrayMerge::PrepareForMerge: set offset at %ld to be %u (originally is "
+          "%ld)\n",
+          num_rows, target->rows_.mutable_offsets()[num_rows], num_bytes);
+
       num_rows += sources[i]->rows_.length();
       num_bytes += sources[i]->rows_.offsets()[sources[i]->rows_.length()];
     }
     target->rows_.mutable_offsets()[num_rows] = static_cast<uint32_t>(num_bytes);
+    printf(
+        "RowArrayMerge::PrepareForMerge: set offset at %ld to be %u (originally is "
+        "%ld)\n",
+        num_rows, target->rows_.mutable_offsets()[num_rows], num_bytes);
   }
 
   return Status::OK();
@@ -574,6 +587,11 @@ void RowArrayMerge::CopyVaryingLength(RowTableImpl* target, const RowTableImpl& 
     int64_t target_row_offset = first_target_row_offset;
     uint64_t* target_row_ptr =
         reinterpret_cast<uint64_t*>(target->mutable_data(2) + target_row_offset);
+    printf(
+        "RowArrayMerge::CopyVaryingLength: first_target_row_offset->%ld, "
+        "first_target_row_id->%ld\n",
+        first_target_row_offset, first_target_row_id);
+
     for (int64_t i = 0; i < num_source_rows; ++i) {
       int64_t source_row_id = source_rows_permutation[i];
       const uint64_t* source_row_ptr = reinterpret_cast<const uint64_t*>(
