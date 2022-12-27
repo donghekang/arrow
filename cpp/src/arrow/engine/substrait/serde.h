@@ -75,6 +75,11 @@ ARROW_ENGINE_EXPORT Result<std::vector<compute::Declaration>> DeserializePlans(
     const ExtensionIdRegistry* registry = NULLPTR, ExtensionSet* ext_set_out = NULLPTR,
     const ConversionOptions& conversion_options = {});
 
+ARROW_ENGINE_EXPORT Result<std::vector<compute::Declaration>> DeserializePlans(
+    const std::string& text_message, const ConsumerFactory& consumer_factory,
+    const ExtensionIdRegistry* registry = NULLPTR, ExtensionSet* ext_set_out = NULLPTR,
+    const ConversionOptions& conversion_options = {});
+
 /// \brief Deserializes a single-relation Substrait Plan message to an execution plan
 ///
 /// The output of each top-level Substrait relation will be sent to a caller supplied

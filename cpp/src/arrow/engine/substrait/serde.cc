@@ -35,6 +35,7 @@
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/message.h>
+#include <google/protobuf/text_format.h>
 #include <google/protobuf/util/json_util.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <google/protobuf/util/type_resolver_util.h>
@@ -172,6 +173,38 @@ Result<std::vector<compute::Declaration>> DeserializePlans(
   return sink_decls;
 }
 
+Result<std::vector<compute::Declaration>> DeserializePlans(
+    const std::string& message_text, DeclarationFactory declaration_factory,
+    const ExtensionIdRegistry* registry, ExtensionSet* ext_set_out,
+    const ConversionOptions& conversion_options) {
+  ::substrait::Plan plan;
+  auto status = google::protobuf::TextFormat::ParseFromString(message_text, &plan);
+  ARROW_ASSIGN_OR_RAISE(auto ext_set,
+                        GetExtensionSetFromPlan(plan, conversion_options, registry));
+
+  std::vector<compute::Declaration> sink_decls;
+  for (const substrait::PlanRel& plan_rel : plan.relations()) {
+    ARROW_ASSIGN_OR_RAISE(
+        auto decl_info,
+        FromProto(plan_rel.has_root() ? plan_rel.root().input() : plan_rel.rel(), ext_set,
+                  conversion_options));
+    std::vector<std::string> names;
+    if (plan_rel.has_root()) {
+      names.assign(plan_rel.root().names().begin(), plan_rel.root().names().end());
+    }
+
+    // pipe each relation
+    ARROW_ASSIGN_OR_RAISE(
+        auto sink_decl,
+        declaration_factory(std::move(decl_info.declaration), std::move(names)));
+    sink_decls.push_back(std::move(sink_decl));
+  }
+
+  if (ext_set_out) {
+    *ext_set_out = std::move(ext_set);
+  }
+  return sink_decls;
+}
 }  // namespace
 
 Result<std::vector<compute::Declaration>> DeserializePlans(
@@ -180,6 +213,15 @@ Result<std::vector<compute::Declaration>> DeserializePlans(
     const ConversionOptions& conversion_options) {
   return DeserializePlans(buf, MakeConsumingSinkDeclarationFactory(consumer_factory),
                           registry, ext_set_out, conversion_options);
+}
+
+Result<std::vector<compute::Declaration>> DeserializePlans(
+    const std::string& text_message, const ConsumerFactory& consumer_factory,
+    const ExtensionIdRegistry* registry, ExtensionSet* ext_set_out,
+    const ConversionOptions& conversion_options) {
+  return DeserializePlans(text_message,
+                          MakeConsumingSinkDeclarationFactory(consumer_factory), registry,
+                          ext_set_out, conversion_options);
 }
 
 Result<std::vector<compute::Declaration>> DeserializePlans(
