@@ -706,6 +706,82 @@ Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet&
                          std::move(output_schema));
     }
 
+    case substrait::Rel::RelTypeCase::kWrite: {
+      const auto& write = rel.write();
+      if (write.op() != substrait::WriteRel_WriteOp_WRITE_OP_CTAS)
+        return Status::Invalid("Must create a new table");
+
+      ARROW_ASSIGN_OR_RAISE(auto input,
+                            FromProto(write.input(), ext_set, conversion_options));
+
+      // rename the attributes as requested
+      ARROW_CHECK_EQ(write.table_schema().names_size(),
+                     input.output_schema->num_fields());
+      std::vector<compute::Expression> proj_expression;
+      std::vector<std::string> proj_names;
+      FieldVector proj_target_fields;
+      for (int i = 0; i < input.output_schema->num_fields(); i++) {
+        std::string name = write.table_schema().names(i);
+        proj_names.push_back(name);
+
+        auto field_ref = compute::field_ref(FieldRef(i));
+        proj_expression.push_back(field_ref);
+        proj_target_fields.push_back(input.output_schema->field(i)->WithName(name));
+      }
+      // add the fake attribute for partitioning
+      const std::string fake_attr_name = "fake_attribute_for_write";
+      proj_names.push_back(fake_attr_name);
+      proj_expression.push_back(compute::literal(0));
+      proj_target_fields.push_back(field(fake_attr_name, arrow::int32()));
+
+      DeclarationInfo proj_decl = {
+          compute::Declaration::Sequence(
+              {input.declaration,
+               {"project",
+                compute::ProjectNodeOptions(std::move(proj_expression), proj_names)}}),
+          schema(proj_target_fields)};
+
+      // write the table
+      std::string targetPath;
+      for (auto n : write.named_table().names()) targetPath += "/" + n;
+      targetPath = targetPath.substr(1);
+      while (targetPath.back() == '/') targetPath.resize(targetPath.length() - 1);
+
+      std::string uri = "file://" + targetPath;
+      std::string rootPath = "/";
+
+      ARROW_ASSIGN_OR_RAISE(std::shared_ptr<arrow::fs::FileSystem> filesystem,
+                            arrow::fs::FileSystemFromUri(uri, &rootPath));
+
+      ARROW_ASSIGN_OR_RAISE(auto targetPathInfo, filesystem->GetFileInfo(targetPath));
+      if (targetPathInfo.IsFile())
+        RETURN_NOT_OK(filesystem->DeleteFile(targetPath));
+      else if (targetPathInfo.IsDirectory())
+        RETURN_NOT_OK(filesystem->DeleteDir(targetPath));
+      else if (targetPathInfo.type() != arrow::fs::FileType::NotFound)
+        return Status::Invalid("Invalid file type");
+      ARROW_RETURN_NOT_OK(filesystem->CreateDir(targetPath));
+
+      auto fake_attribute = proj_decl.output_schema->GetFieldByName(fake_attr_name);
+
+      arrow::dataset::FileSystemDatasetWriteOptions write_options;
+      write_options.file_write_options =
+          std::make_shared<arrow::dataset::ParquetFileFormat>()->DefaultWriteOptions();
+      write_options.filesystem = filesystem;
+      write_options.base_dir = targetPath;
+      write_options.basename_template = "part-{i}.parquet";
+      write_options.partitioning = std::make_shared<arrow::dataset::HivePartitioning>(
+          arrow::schema({fake_attribute}));
+      arrow::dataset::WriteNodeOptions write_node_options{write_options};
+
+      std::shared_ptr<Schema> write_schema = schema(FieldVector());
+      DeclarationInfo write_declaration{
+          compute::Declaration::Sequence(
+              {std::move(proj_decl.declaration), {"write", write_node_options}}),
+          write_schema};
+      return write_declaration;
+    }
+
     default:
       break;
   }

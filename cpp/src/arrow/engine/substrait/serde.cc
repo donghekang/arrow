@@ -179,11 +179,18 @@ Result<std::vector<compute::Declaration>> DeserializePlans(
     const ConversionOptions& conversion_options) {
   ::substrait::Plan plan;
   auto status = google::protobuf::TextFormat::ParseFromString(message_text, &plan);
+  if (!status) return Status::Invalid("Deserializing plans fails");
   ARROW_ASSIGN_OR_RAISE(auto ext_set,
                         GetExtensionSetFromPlan(plan, conversion_options, registry));
 
   std::vector<compute::Declaration> sink_decls;
   for (const substrait::PlanRel& plan_rel : plan.relations()) {
+    bool has_write = false;
+    if (plan_rel.has_root())
+      has_write = plan_rel.root().input().has_write();
+    else
+      has_write = plan_rel.rel().has_write();
+
     ARROW_ASSIGN_OR_RAISE(
         auto decl_info,
         FromProto(plan_rel.has_root() ? plan_rel.root().input() : plan_rel.rel(), ext_set,
@@ -194,10 +201,13 @@ Result<std::vector<compute::Declaration>> DeserializePlans(
     }
 
     // pipe each relation
-    ARROW_ASSIGN_OR_RAISE(
-        auto sink_decl,
-        declaration_factory(std::move(decl_info.declaration), std::move(names)));
-    sink_decls.push_back(std::move(sink_decl));
+    if (!has_write) {
+      ARROW_ASSIGN_OR_RAISE(
+          auto sink_decl,
+          declaration_factory(std::move(decl_info.declaration), std::move(names)));
+      sink_decls.push_back(std::move(sink_decl));
+    } else
+      sink_decls.push_back(std::move(decl_info.declaration));
   }
 
   if (ext_set_out) {
