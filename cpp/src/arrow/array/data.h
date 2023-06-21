@@ -167,6 +167,16 @@ struct ARROW_EXPORT ArrayData {
 
   std::shared_ptr<ArrayData> Copy() const { return std::make_shared<ArrayData>(*this); }
 
+  arrow::Result<std::shared_ptr<ArrayData>> DeepCopy() const {
+    auto ret = this->Copy();
+    ret->buffers.clear();
+    for (const auto& b : this->buffers) {
+      ARROW_ASSIGN_OR_RAISE(auto cb, b->CopySlice(0, b->size()));
+      ret->buffers.push_back(std::move(cb));
+    }
+    return ret;
+  }
+
   bool IsNull(int64_t i) const {
     return ((buffers[0] != NULLPTR) ? !bit_util::GetBit(buffers[0]->data(), i + offset)
                                     : null_count.load() == length);

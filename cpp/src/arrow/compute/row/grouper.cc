@@ -278,12 +278,12 @@ struct GrouperFastImpl : Grouper {
   }
 
   ~GrouperFastImpl() {
-    printf("GrouperFastImpl %p has %d groups\n", (void*)this, this->num_groups());
+    // printf("GrouperFastImpl %p has %d groups\n", (void*)this, this->num_groups());
     map_.cleanup();
-    printf("GrouperFastImpl %p Consume %f seconds\n", (void*)this,
-           elapsed[0] / 1000000.0);
-    printf("GrouperFastImpl %p GetUnique %f seconds\n", (void*)this,
-           elapsed[1] / 1000000.0);
+    // printf("GrouperFastImpl %p Consume %f seconds\n", (void*)this,
+    //        elapsed[0] / 1000000.0);
+    // printf("GrouperFastImpl %p GetUnique %f seconds\n", (void*)this,
+    //        elapsed[1] / 1000000.0);
   }
 
   Result<Datum> Consume(const ExecSpan& batch) override {

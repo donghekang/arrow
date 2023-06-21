@@ -250,6 +250,10 @@ class ARROW_DS_EXPORT ParquetFileWriter : public FileWriter {
 
   std::shared_ptr<parquet::arrow::FileWriter> parquet_writer_;
 
+  std::vector<std::shared_ptr<RecordBatch>> batches_;
+  int64_t batches_bytes_ = 0;
+  int64_t max_row_group_size_ = 64 * 1024 * 1024;
+
   friend class ParquetFileFormat;
 };
 

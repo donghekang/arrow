@@ -552,16 +552,40 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<io::OutputStream> destinati
                                      std::shared_ptr<parquet::arrow::FileWriter> writer,
                                      std::shared_ptr<ParquetFileWriteOptions> options,
                                      fs::FileLocator destination_locator)
-    : FileWriter(writer->schema(), std::move(options), std::move(destination),
+    : FileWriter(writer->schema(), options, std::move(destination),
                  std::move(destination_locator)),
-      parquet_writer_(std::move(writer)) {}
+      parquet_writer_(std::move(writer)) {
+  max_row_group_size_ = options->writer_properties->max_row_group_length();
+}
 
 Status ParquetFileWriter::Write(const std::shared_ptr<RecordBatch>& batch) {
-  ARROW_ASSIGN_OR_RAISE(auto table, Table::FromRecordBatches(batch->schema(), {batch}));
-  return parquet_writer_->WriteTable(*table, batch->num_rows());
+  // copy the batch into batches_
+  std::vector<std::shared_ptr<ArrayData>> batch_columns;
+  for (int i = 0; i < batch->num_columns(); i++) {
+    ARROW_ASSIGN_OR_RAISE(auto array_data, batch->column_data(i)->DeepCopy());
+    for (const auto& b : array_data->buffers) batches_bytes_ += b->size();
+    batch_columns.push_back(std::move(array_data));
+  }
+  batches_.push_back(
+      RecordBatch::Make(batch->schema(), batch->num_rows(), batch_columns));
+
+  Status status = Status::OK();
+  if (batches_bytes_ >= max_row_group_size_) {
+    ARROW_ASSIGN_OR_RAISE(auto table,
+                          Table::FromRecordBatches(batch->schema(), batches_));
+    status = parquet_writer_->WriteTable(*table, table->num_rows());
+    batches_.clear();
+    batches_bytes_ = 0;
+  }
+  return status;
 }
 
 Future<> ParquetFileWriter::FinishInternal() {
+  if (!batches_.empty()) {
+    auto table = Table::FromRecordBatches(batches_[0]->schema(), batches_).ValueOrDie();
+    auto status = parquet_writer_->WriteTable(*table, table->num_rows());
+    ARROW_CHECK(status.ok());
+  }
   return DeferNotOk(destination_locator_.filesystem->io_context().executor()->Submit(
       [this]() { return parquet_writer_->Close(); }));
 }
