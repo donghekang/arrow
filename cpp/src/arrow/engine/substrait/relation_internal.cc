@@ -742,9 +742,17 @@ Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet&
           schema(proj_target_fields)};
 
       // write the table
-      std::string targetPath;
-      for (auto n : write.named_table().names()) targetPath += "/" + n;
-      targetPath = targetPath.substr(1);
+      std::string targetPath, format_str = "parquet";
+      ARROW_CHECK_LE(write.named_table().names_size(), 2);
+      ARROW_CHECK_GT(write.named_table().names_size(), 0);
+      targetPath = write.named_table().names(0);
+      if (write.named_table().names_size() == 2) {
+        format_str = write.named_table().names(1);
+        for (char& c : format_str) c = tolower(c);
+        ARROW_CHECK(format_str == "parquet" || format_str == "arrow");
+      }
+      // for (auto n : write.named_table().names()) targetPath += "/" + n;
+      // targetPath = targetPath.substr(1);
       while (targetPath.back() == '/') targetPath.resize(targetPath.length() - 1);
 
       std::string uri = "file://" + targetPath;
@@ -767,9 +775,14 @@ Result<DeclarationInfo> FromProto(const substrait::Rel& rel, const ExtensionSet&
       arrow::dataset::FileSystemDatasetWriteOptions write_options;
       write_options.file_write_options =
           std::make_shared<arrow::dataset::ParquetFileFormat>()->DefaultWriteOptions();
+      if (format_str == "arrow") {
+        write_options.file_write_options =
+            std::make_shared<arrow::dataset::IpcFileFormat>()->DefaultWriteOptions();
+      }
+      write_options.basename_template = "part-{i}." + format_str;
+
       write_options.filesystem = filesystem;
       write_options.base_dir = targetPath;
-      write_options.basename_template = "part-{i}.parquet";
       write_options.partitioning = std::make_shared<arrow::dataset::HivePartitioning>(
           arrow::schema({fake_attribute}));
       arrow::dataset::WriteNodeOptions write_node_options{write_options};
